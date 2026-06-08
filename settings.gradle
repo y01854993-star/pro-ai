@@ -1,0 +1,340 @@
+package com.pro.ai.assistant;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Intent;
+import android.os.Build;
+import android.os.IBinder;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
+import android.speech.tts.TextToSpeech;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+import android.util.Log;
+import android.os.Bundle;
+
+import java.util.ArrayList;
+import android.content.SharedPreferences;
+import android.preference.PreferenceManager;
+import java.util.Locale;
+import java.util.HashMap;
+import java.util.Map;
+
+public class AssistantService extends Service implements TextToSpeech.OnInitListener {
+
+    private static final String TAG = "AssistantService";
+    private static final String CHANNEL_ID = "ProAIAssistantChannel";
+
+    private SpeechRecognizer speechRecognizer;
+    private TextToSpeech textToSpeech;
+    private Intent speechRecognizerIntent;
+
+    private boolean isListening = false;
+    private boolean isWakeWordDetected = false;
+
+    private SharedPreferences sharedPreferences;
+    private String userName = "";
+    private Map<String, String> memory = new HashMap<>();
+
+    private String assistantName = "pro";
+
+    public static final String ACTION_ACCESSIBILITY_COMMAND = "com.pro.ai.assistant.ACCESSIBILITY_COMMAND";
+    public static final String EXTRA_COMMAND_TYPE = "command_type";
+    public static final String COMMAND_READ_SCREEN = "read_screen";
+    public static final String COMMAND_OPEN_APP = "open_app";
+    public static final String COMMAND_PERFORM_GLOBAL_ACTION = "perform_global_action";
+    public static final String EXTRA_GLOBAL_ACTION_TYPE = "global_action_type";
+    public static final String COMMAND_CAMERA_VISION = "camera_vision";
+    public static final String EXTRA_IMAGE_PATH = "image_path";
+    public static final String EXTRA_PACKAGE_NAME = "package_name";
+
+    private BroadcastReceiver accessibilityResponseReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (ACTION_ACCESSIBILITY_COMMAND.equals(intent.getAction())) {
+                String commandType = intent.getStringExtra(EXTRA_COMMAND_TYPE);
+                if (COMMAND_CAMERA_VISION.equals(commandType)) {
+                    String imagePath = intent.getStringExtra(EXTRA_IMAGE_PATH);
+                    String error = intent.getStringExtra("error");
+                    if (error != null) {
+                        speak("حدث خطأ أثناء التقاط الصورة: " + error);
+                    } else if (imagePath != null) {
+                        String visionResult = "أرى صورة تحتوي على... (هذا تحليل وهمي).\nمسار الصورة: " + imagePath;
+                        speak(visionResult);
+                    } else {
+                        speak("لم يتم التقاط صورة.");
+                    }
+                } else {
+                    String response = intent.getStringExtra("response");
+                    if (response != null) {
+                        speak(response);
+                    }
+                }
+            }
+        }
+    };
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        Log.d(TAG, "AssistantService onCreate");
+
+        createNotificationChannel();
+        Notification notification = new Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("Pro AI Assistant")
+                .setContentText("Running in background")
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .build();
+        startForeground(1, notification);
+
+        initTextToSpeech();
+        initSpeechRecognizer();
+
+        LocalBroadcastManager.getInstance(this).registerReceiver(accessibilityResponseReceiver, new IntentFilter(ACTION_ACCESSIBILITY_COMMAND));
+
+        sharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
+        userName = sharedPreferences.getString("user_name", "");
+        Map<String, ?> allEntries = sharedPreferences.getAll();
+        for (Map.Entry<String, ?> entry : allEntries.entrySet()) {
+            if (entry.getKey().startsWith("memory_")) {
+                memory.put(entry.getKey().replace("memory_", ""), entry.getValue().toString());
+            }
+        }
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        Log.d(TAG, "AssistantService onStartCommand");
+        if (!isListening) {
+            startListeningForWakeWord();
+        }
+        return START_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel serviceChannel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Pro AI Assistant Channel",
+                    NotificationManager.IMPORTANCE_DEFAULT
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(serviceChannel);
+        }
+    }
+
+    private void initTextToSpeech() {
+        textToSpeech = new TextToSpeech(this, this);
+    }
+
+    @Override
+    public void onInit(int status) {
+        if (status == TextToSpeech.SUCCESS) {
+            int result = textToSpeech.setLanguage(new Locale("ar", "SA"));
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e(TAG, "Arabic language not supported or missing data");
+                textToSpeech.setLanguage(Locale.getDefault());
+            } else {
+                Log.d(TAG, "TextToSpeech initialized with Arabic");
+            }
+        } else {
+            Log.e(TAG, "TextToSpeech initialization failed");
+        }
+    }
+
+    private void speak(String text) {
+        if (textToSpeech != null && textToSpeech.isSpeaking()) {
+            textToSpeech.stop();
+        }
+        if (textToSpeech != null) {
+            textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, null);
+        }
+    }
+
+    private void initSpeechRecognizer() {
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+        speechRecognizerIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-SA");
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, this.getPackageName());
+        speechRecognizerIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+
+        speechRecognizer.setRecognitionListener(new RecognitionListener() {
+            @Override
+            public void onReadyForSpeech(Bundle params) {
+                isListening = true;
+            }
+
+            @Override
+            public void onBeginningOfSpeech() {}
+
+            @Override
+            public void onRmsChanged(float rmsdB) {}
+
+            @Override
+            public void onBufferReceived(byte[] buffer) {}
+
+            @Override
+            public void onEndOfSpeech() {
+                isListening = false;
+            }
+
+            @Override
+            public void onError(int error) {
+                isListening = false;
+                if (error != SpeechRecognizer.ERROR_CLIENT && error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                    startListeningForWakeWord();
+                }
+            }
+
+            @Override
+            public void onResults(Bundle results) {
+                ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (matches != null && !matches.isEmpty()) {
+                    String spokenText = matches.get(0);
+                    if (isWakeWordDetected) {
+                        handleCommand(spokenText);
+                        isWakeWordDetected = false;
+                    } else {
+                        checkForWakeWord(spokenText);
+                    }
+                }
+                startListeningForWakeWord();
+            }
+
+            @Override
+            public void onPartialResults(Bundle partialResults) {
+                ArrayList<String> matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                if (matches != null && !matches.isEmpty()) {
+                    String partialText = matches.get(0);
+                    if (!isWakeWordDetected) {
+                        checkForWakeWord(partialText);
+                    }
+                }
+            }
+
+            @Override
+            public void onEvent(int eventType, Bundle params) {}
+        });
+    }
+
+    private void startListeningForWakeWord() {
+        if (speechRecognizer != null && !isListening) {
+            speechRecognizer.startListening(speechRecognizerIntent);
+        }
+    }
+
+    private void checkForWakeWord(String text) {
+        if (text.toLowerCase(new Locale("ar", "SA")).contains("يا مساعد") || text.toLowerCase(new Locale("ar", "SA")).contains("برو")) {
+            isWakeWordDetected = true;
+            String greeting = "أنا معاك.";
+            if (!userName.isEmpty()) {
+                greeting = "أهلاً يا " + userName + ". أنا معاك.";
+            }
+            speak(greeting);
+        }
+    }
+
+    private void handleCommand(String command) {
+        String cmd = command.toLowerCase(new Locale("ar", "SA"));
+        
+        if (cmd.contains("اسمي ")) {
+            String name = cmd.substring(cmd.indexOf("اسمي ") + "اسمي ".length()).trim();
+            if (!name.isEmpty()) {
+                userName = name;
+                sharedPreferences.edit().putString("user_name", userName).apply();
+                speak("تشرفت بمعرفتك يا " + userName + ".");
+            } else {
+                speak("لم أفهم اسمك.");
+            }
+        } else if (cmd.contains("تذكر أن ")) {
+            String fact = cmd.substring(cmd.indexOf("تذكر أن ") + "تذكر أن ".length()).trim();
+            if (!fact.isEmpty()) {
+                String key = "memory_" + System.currentTimeMillis();
+                memory.put(key, fact);
+                sharedPreferences.edit().putString(key, fact).apply();
+                speak("حسناً، سأتذكر أن " + fact + ".");
+            } else {
+                speak("ماذا تريد أن أتذكر؟");
+            }
+        } else if (cmd.contains("ماذا تتذكر")) {
+            if (!memory.isEmpty()) {
+                StringBuilder rememberedFacts = new StringBuilder("أتذكر الآتي: ");
+                for (String fact : memory.values()) {
+                    rememberedFacts.append(fact).append(". ");
+                }
+                speak(rememberedFacts.toString());
+            } else {
+                speak("لا أتذكر أي شيء حالياً.");
+            }
+        } else if (cmd.contains("ما اسمك")) {
+            speak("اسمي " + assistantName + ".");
+        } else if (cmd.contains("صباح الخير")) {
+            String greeting = "صباح الخير.";
+            if (!userName.isEmpty()) {
+                greeting = "صباح الخير يا " + userName + ".";
+            }
+            speak(greeting);
+        } else if (cmd.contains("افتح واتساب")) {
+            speak("تم فتح واتساب.");
+            sendAccessibilityCommand(COMMAND_OPEN_APP, "com.whatsapp");
+        } else if (cmd.contains("افتح يوتيوب")) {
+            speak("تم فتح يوتيوب.");
+            sendAccessibilityCommand(COMMAND_OPEN_APP, "com.google.android.youtube");
+        } else if (cmd.contains("الرئيسية")) {
+            speak("العودة إلى الشاشة الرئيسية.");
+            sendAccessibilityCommand(COMMAND_PERFORM_GLOBAL_ACTION, "home");
+        } else if (cmd.contains("رجوع")) {
+            speak("العودة للخلف.");
+            sendAccessibilityCommand(COMMAND_PERFORM_GLOBAL_ACTION, "back");
+        } else if (cmd.contains("التطبيقات الأخيرة")) {
+            speak("فتح التطبيقات الأخيرة.");
+            sendAccessibilityCommand(COMMAND_PERFORM_GLOBAL_ACTION, "recents");
+        } else if (cmd.contains("الإشعارات")) {
+            speak("فتح الإشعارات.");
+            sendAccessibilityCommand(COMMAND_PERFORM_GLOBAL_ACTION, "notifications");
+        } else if (cmd.contains("الإعدادات السريعة")) {
+            speak("فتح الإعدادات السريعة.");
+            sendAccessibilityCommand(COMMAND_PERFORM_GLOBAL_ACTION, "quick_settings");
+        } else if (cmd.contains("قفل الشاشة")) {
+            speak("قفل الشاشة.");
+            sendAccessibilityCommand(COMMAND_PERFORM_GLOBAL_ACTION, "lock_screen");
+        } else if (cmd.contains("أخذ لقطة شاشة") || cmd.contains("سكرين شوت")) {
+            speak("أخذ لقطة شاشة.");
+            sendAccessibilityCommand(COMMAND_PERFORM_GLOBAL_ACTION, "take_screenshot");
+        } else if (cmd.contains("بص على الشاشة") || cmd.contains("اقرأ الشاشة")) {
+            speak("حسناً، سألقي نظرة على الشاشة.");
+            sendAccessibilityCommand(COMMAND_READ_SCREEN, null);
+        } else if (cmd.contains("بص بالكاميرا") || cmd.contains("افتح الكاميرا")) {
+            speak("حسناً، سأستخدم الكاميرا.");
+            Intent cameraIntent = new Intent(this, CameraActivity.class);
+            cameraIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(cameraIntent);
+        } else {
+            speak("لم أفهم طلبك.");
+        }
+    }
+
+    private void sendAccessibilityCommand(String commandType, String data) {
+        Intent intent = new Intent(ACTION_ACCESSIBILITY_COMMAND);
+        intent.putExtra(EXTRA_COMMAND_TYPE, commandType);
+        if (COMMAND_OPEN_APP.equals(commandType)) {
+            intent.putExtra(EXTRA_PACKAGE_NAME, data);
+        } else if (COMMAND_PERFORM_GLOBAL_ACTION.equals(commandType)) {
+            intent.putExtra(EXTRA_GLOBAL_ACTION_TYPE, data);
+        } else if (COMMAND_CAMERA_VISION.equals(commandType)) {
+            intent.putExtra(EXTRA_IMAGE_PATH, data);
+        }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
+    }
+}
